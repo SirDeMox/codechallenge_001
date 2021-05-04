@@ -1,0 +1,177 @@
+---
+title: "Investigation"
+author: "MP"
+date: "29 4 2021"
+output: html_document
+---
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+setwd("D:/Python Projects/codechallenge_001")
+```
+
+```{r}
+users <- read_csv("data/user_info.csv",
+    col_types = cols(
+      user_id = col_double(),
+      country_id = col_character(),
+      next_exam_type = col_character(),
+      marketing_source = col_character(),
+      signup_device = col_character(),
+      signup_os = col_character(),
+      activated = col_double(),
+      register_date = col_datetime(format = "")
+    )
+  )
+activations <- read_csv("data/code_activations.csv",
+    col_types = cols(
+      user_id = col_double(),
+      code_activation = col_datetime(format = ""),
+      access_start = col_datetime(format = ""),
+      access_end = col_datetime(format = ""),
+      days = col_double()
+    )
+  )
+chapters <- read_csv("data/chapters_read.csv",
+   col_types = cols(
+      user_id = col_double(),
+      created_at = col_datetime(format = ""),
+      referer = col_character(),
+      time_spent = col_double(),
+      chapter_id = col_double(),
+      subjects = col_character()
+    )
+ )
+questions <- read_csv("data/questions_read.csv",
+    col_types = cols(
+      user_id = col_double(),
+      question_id = col_double(),
+      answer_id = col_double(),
+      collection_id = col_double(),
+      created_at = col_datetime(format = ""),
+      was_answer_correct = col_double(),
+      is_completed = col_double(),
+      has_given_up = col_double(),
+      time_spent = col_double(),
+      used_highlight = col_double(),
+      used_case_highlight = col_double(),
+      used_hint_as_help = col_double(),
+      used_hint_as_nonsense = col_double(),
+      chapter_ids = col_character()
+  )
+)
+```
+
+Hello reader, I will take you through my journey on the data. As this is an exploratory data analysis, I will not revise this afterwards, but show you my way of working through this dataset.
+
+After reading it in, I want to get a feel for the data. I usually do this by looking at summary statistics of individual columns.
+
+Let's start by looking at the users first, as they are the most important stakeholder for us. We start by looking at where they are coming from.
+
+```{r}
+users %>% 
+  group_by(country_id) %>% 
+  summarise(n=n()) %>% 
+  arrange(-n)
+```
+The first things we notice, is that there are 205 distinct countries. Random fact about me: I am kinda a geo-nerd. So I know that there are only 195 countries (because I learned all the flags at some point...). Well, thats interesting isn't it? 
+We learn that for 10k cases we don't have a country information. We could check later if these are users who don't end up having code activations. From my experience those cases are either incomplete profiles or cases where tracking is disabled -> GDPR and such. But they could also indicate a bug or a path through the onboarding which is not tested enough by the product team.
+
+Later, when we figure out how to capture the US market, I would focus down the analysis on the US customers. It is rare to see that you really can transfer learnings between continents. "transfer learnings" in an analytical as well as ML sense.
+
+```{r}
+users %>% 
+  filter(country_id=="VA")
+```
+
+We have someone from Vatican City who signed up via his Android phone. Funny, huh?
+
+
+```{r}
+users %>%
+  group_by(marketing_source) %>% 
+  summarise(n=n(),
+            us_n = sum(country_id=="US", na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  mutate(p = round(n/sum(n)*100,1),
+         us_p = round(us_n/sum(us_n)*100,1)) %>% 
+  arrange(-n)
+  
+```
+
+Looking at marketing sources now, we could interpret NULL values as "organic". We also see a steep decline here. I am surprised that "university" is so far down the list, as the tool is fairly useful for students.
+
+Looking at US again, we see a roughly similar distribution versus the world.
+
+Next I want to have a look into the onboarding process from a tech perspective. Looking at activation rates of different divices could shed some light on the quality of the products accessability across platforms.
+
+```{r}
+users %>% 
+  group_by(signup_device) %>% 
+  summarise(n=n(),
+            activated_sum = sum(activated),
+            activated_p = round(activated_sum/n*100,2))
+
+```
+
+Desktops have by far the highest activation rate, followed by tablet and mobile, each with a 5% performance drop to the afore-mentioned. 
+We also detected another case of NULLs, potentially of tracking reasons.
+Just based on this, I would use the signup-device as a parameter for any marketing strategy, it clearly has an influence on conversion. Noteable is also that most customers are signing up via mobile. My first questions are: Are we advertising on mobile more than on other platforms? If not, and marketing is spend evenly, our users tend to sign up via mobile. And if that's the case, let's get the product team together and rethink the onboarding experience for mobile!
+
+
+Also for the interested reader, I am now roughly 45 mins in, I love taking my time understanding what's going on and to be fair, the narrative is also taking quite some time :) 
+```{r}
+table(users$next_exam_type)
+
+```
+
+Looking at chapters now. First thing I feel like knowing is if the subjects on the chapters_ids are consistent or fluctuate. My thought was to split the subjects up to dive deeper into them, but they need to be consistent for it to make any sense on chapter_id level.
+
+```{r}
+chapters %>% 
+  group_by(chapter_id, subjects) %>% 
+  summarise(visits=n())
+
+```
+
+```{r}
+chapters$chapter_id %>% unique() %>% length()
+```
+
+Good news! Chapter subjects don't change, otherwise we would have found duplicates in the chapter_ids.
+
+Seeing the subjects listed like this makes me want to show them as graphs, but I havn't done it in ages. What I will do now is cleaning up the subjects, e.g. create a new table for chapters alone with a row being a combination of chapter_id and a single subject. This will be of tremendous value for any analysis to follow. Afterwards I will spend 5 mins googling for network diagrams and see if I can make it work.
+
+
+```{r}
+chapter_subject_mapper = chapters %>% 
+  group_by(chapter_id) %>% 
+  mutate(rank = row_number()) %>% 
+  ungroup() %>% 
+  filter(rank==1) %>% 
+  select(chapter_id, subjects) %>% 
+  mutate(subjects = str_replace(subjects,"'",""),
+         subjects = str_replace(subjects,"[",""),
+         subjects = str_replace(subjects,"]","")) %>% 
+  separate_rows(subjects, sep = ",") %>% 
+  filter(subjects!="") %>% 
+  rename(subject=subjects) %>% 
+  mutate(subject = tolower(subject))
+chapter_subject_mapper
+```
+
+In the chunk above I take the first entry of all chapter_ids, drop the rest as well as all cols which are not relevant and then turn every subject into an individual row.
+
+Now we could easily answer a question like which subject has the highest average reading time. Or which subject has the lowest amount of readers. Let's do that quickly!
+
+
+```{r}
+chapters %>% 
+  left_join(chapter_subject_mapper) %>% 
+  group_by(subject) %>% 
+  summarise(number_reads = n(),
+            average_reading_time = mean(time_spent, na.rm=TRUE),
+            number_of_readers = length(unique(user_id)))
+```
+
+Time Investment 65 mins so far
