@@ -7,6 +7,8 @@ output: html_document
 
 ```{r message=FALSE, warning=FALSE}
 library(tidyverse)
+library(GGally)
+library(lubridate)
 setwd("D:/Python Projects/codechallenge_001")
 ```
 
@@ -140,23 +142,22 @@ chapters$chapter_id %>% unique() %>% length()
 
 Good news! Chapter subjects don't change, otherwise we would have found duplicates in the chapter_ids.
 
-Seeing the subjects listed like this makes me want to show them as graphs, but I havn't done it in ages. What I will do now is cleaning up the subjects, e.g. create a new table for chapters alone with a row being a combination of chapter_id and a single subject. This will be of tremendous value for any analysis to follow. Afterwards I will spend 5 mins googling for network diagrams and see if I can make it work.
+Seeing the subjects listed like this makes me want to show them as graphs, but I havn't done it in ages. What I will do now is cleaning up the subjects, e.g. create a new table for chapters alone with a row being a combination of chapter_id and a single subject. This will be of tremendous value for any analysis to follow.
 
+note: I am dealing here with a typical `['','','']` list structure. It always feels like they are more home in Python than they are in R. So I am treating them as strings, removing their formatting before splitting them apart.
 
 ```{r}
 chapter_subject_mapper = chapters %>% 
   group_by(chapter_id) %>% 
-  mutate(rank = row_number()) %>% 
+  mutate(rank = row_number()) %>% # running index
   ungroup() %>% 
-  filter(rank==1) %>% 
+  filter(rank==1) %>% # select the first entry
   select(chapter_id, subjects) %>% 
-  mutate(subjects = str_replace(subjects,"'",""),
-         subjects = str_replace(subjects,"[",""),
-         subjects = str_replace(subjects,"]","")) %>% 
-  separate_rows(subjects, sep = ",") %>% 
-  filter(subjects!="") %>% 
-  rename(subject=subjects) %>% 
-  mutate(subject = tolower(subject))
+  mutate(subjects = str_replace_all(subjects,"\\[|\\]|'","")) %>% # remove brackets and single quotation
+  separate_rows(subjects, sep = ",") %>% # split by comma into new rows
+  filter(subjects!="") %>% # remove parsing errors
+  rename(subject=subjects) %>% # renaming
+  mutate(subject = tolower(subject)) # lowercasing
 chapter_subject_mapper
 ```
 
@@ -174,4 +175,145 @@ chapters %>%
             number_of_readers = length(unique(user_id)))
 ```
 
-Time Investment 65 mins so far
+Time Investment 75 mins so far.
+
+Let's define some performance KPIs and apply them to different origins of customers.
+
+## KPI definitions
+
+### Interaction Volumne
+With the Interaction Volumne KPIs we want to express a customers behavior in the first 5 days, a foundation for predicting the likelyhood use the tool after the free trial.
+
+We start by defining up until which point the free trial worked, ultimately we should exclude those cases where there was an activation within those 5 days, but I skip that for time sake.
+
+```{r}
+user_regis = users %>% 
+  mutate(register_date = date(register_date),
+         free_trial_until = register_date+5) %>% 
+  select(user_id, register_date, free_trial_until)
+user_regis
+```
+
+Next, we combine it with their chapters information. I want to derive 3 metrics here: Number of chapters they "started", number of chapters they have not spend any time on, and the sum of time_spent. All 3 should grant us insights. Note that time_spent is only available for mobile users.
+
+
+
+```{r}
+chapter_KPIs = user_regis %>% 
+  left_join(chapters, by="user_id") %>% 
+  mutate(chapter_c_date = date(created_at)) %>% 
+  filter(chapter_c_date <= free_trial_until) %>%
+  group_by(user_id) %>% 
+  summarise(n_chapters = n(),
+            n_spent_time = n_chapters - sum(is.na(time_spent)),
+            sum_time_spent = sum(time_spent, na.rm = TRUE))
+chapter_KPIs
+```
+
+We immediately see cases where there are a lot of chapters opened, but no time spent at all.
+
+Now we look into their behavior on questions, before combining them back together and aggregate on different levels.
+
+We can see that there are two outlines in the dataset, so I will ignore those two cases going on.
+
+```{r}
+chapter_KPIs %>% 
+  ggplot(aes(x=sum_time_spent,y=n_chapters)) +
+  geom_point()
+```
+
+```{r}
+chapter_KPIs = chapter_KPIs %>% 
+  filter(sum_time_spent <= 11300 & n_chapters <= 220) # 99th percentile
+```
+
+
+```{r}
+chapter_KPIs %>% 
+  ggplot(aes(x=sum_time_spent,y=n_chapters)) +
+  geom_point()+
+  geom_smooth(method="lm")
+```
+
+I looked at time spend versus the number of chapters to see if I infer missing datapoints for time_spent for the non-mobile users. Truth be told, not sure if I should infer from mobile behavior to non-mobile behavior in the first place. But looking at the scatter plot above there is a really interesting insight: It looks like two overlapping distributions! This cloud of data points above the linear abline looks like this trade-off between chapters and time spent has a third, yet unaccounted variable.
+
+Just as a sidenote, the questions offer a tremendous amount of insights. Hint-usage, answer-rate, difficulty... and we can link it all back to the chapters and their content. That's a holy grail for analytical purposes.
+
+```{r}
+question_KPIs = user_regis %>% 
+  left_join(questions, by="user_id") %>% 
+  mutate(question_c_date = date(created_at)) %>% 
+  filter(question_c_date <= free_trial_until) %>%
+  group_by(user_id) %>% 
+  summarise(n_questions = n(),
+            given_up_flag = any(has_given_up==1),
+            right_answer_rate = round(mean(was_answer_correct, na.rm = TRUE)*100,2),
+            sum_time_spent_q = sum(time_spent, na.rm = TRUE))
+question_KPIs
+```
+
+The questions also do have a time spent columns, my instinct is to sum it up with the time spend of chapters to get a fuller picture.
+
+I created a flag if they ever given up, counted questions, calculated the share of right answers and calculated time spent on questions.
+
+Now I bring them together!
+
+```{r}
+interaction_volume = chapter_KPIs %>% 
+  left_join(question_KPIs, by = "user_id") %>% 
+  mutate(time_spent_trial = sum_time_spent+sum_time_spent_q)
+interaction_volume
+```
+
+
+The lack of adaptation of the questions feature makes it hard to judge the meaningfulnis of those KPIs. For me, every NA in these KPIs is also telling a story. The fact, that a customer has not discovered or used the questions feature is a valid observation which could have a big impact. You always have to question if your missing data is actual data!
+
+timespent: 1:45h
+
+## Analysis for interaction volumn in trial period
+
+Given the KPIs we just developed, we are able to answer some questions. First off, let's try to find a link between the first 5 days of activity and the number of code activations throughout their lifetime.
+
+```{r}
+activation_counts = activations %>% group_by(user_id) %>% count()
+df = interaction_volume %>% 
+  left_join(activation_counts, by="user_id") %>% 
+  select(n_chapters, n_questions,right_answer_rate, given_up_flag, time_spent_trial, n)
+df
+```
+
+This dataframe above could be a foundation for modeling. A couple of steps need to be thought of:
+1. The scale of the numbers. e.g. time_spent_trial ranges significantly. One could set boundaries or categories beforehand. e.g. "low time spent" "mid time spent" "high time spent"... Or you use a model which tries to capture it.
+2. Infer further features. time spent = NA might be a more meaningful feature then the numeric value of time_spent_trial. (remember, this is only valid for mobile users)
+3. Take the time and go through features and combinations on the search for significance.
+
+
+I want to quickly get a feeling for activations, before I wrap things up.
+
+```{r}
+interaction_volume %>% 
+  left_join(activation_counts, by="user_id") %>% 
+  mutate(any_n = !is.na(n)) %>% 
+  group_by(any_n) %>% 
+  summarise(chapters_avg = mean(n_chapters, na.rm = TRUE),
+            questions_avg = mean(n_questions, na.rm = TRUE),
+            RAR_avg = mean(right_answer_rate, na.rm = TRUE),
+            given_up_avg = mean(given_up_flag, na.rm = TRUE))
+  
+```
+
+Just by looking at some aggregated numbers, we figure out that interaction in terms of number of chapters and questions will separate those who later activate. Yet the right_answer rate and given up ratio doesn't seem to indicate big differences.
+
+```{r fig.height=10, fig.width=10, message=FALSE, warning=FALSE}
+interaction_volume %>% 
+  left_join(activation_counts, by="user_id") %>% 
+  mutate(any_n = !is.na(n)) %>% 
+  select(n_chapters, n_questions, given_up_flag, right_answer_rate, time_spent_trial, any_n) %>% 
+  ggpairs(aes(fill=as.factor(any_n),color=as.factor(any_n)))
+```
+
+To wrap things up, here is a really bright graph of some selected features from within the first 5 days in relation to each other and split by if they will ever activate or not.
+Are there any learnings here? Well, the same learnings as before, just wrapped into an overwhelming plot :) It would be something you print on canvas and frame it, not something you would actually use to come to conclusions with. Anyway, I felt this doc needs some more plotting and color, so here we are.
+
+## final words
+This is where I will end. I worked a total of ~3 hours on it and I did not spend any time on trying to build machine learning models. Why you may ask? You need to build up understanding before your train any model. This understanding, if done correctly can be of great benefit for the whole company. Your feature engineering, or the creation of new KPIs can have a long lasting impact. It all depends dramatically if you, the data scientist, have the business case in mind, or just focus on data. 
